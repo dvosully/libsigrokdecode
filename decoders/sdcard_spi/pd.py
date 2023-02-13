@@ -69,6 +69,7 @@ class Decoder(srd.Decoder):
         self.cmd = 0
         self.r1 = 0
         self.start_token_found = False
+        self.finish_token_found = False
         self.is_first_rx = False
         self.busy_first_byte = False
 
@@ -354,8 +355,8 @@ class Decoder(srd.Decoder):
             self.state = 'WAIT DATA RESPONSE'
         elif (self.is_acmd) and (self.cmd == 51):
             self.state = 'WAIT DATA RESPONSE'
-        elif (24 == self.cmd):
-            self.state = 'HANDLE DATA BLOCK CMD24'
+        elif (not self.is_acmd) and (self.cmd in (24, 25)):
+            self.state = 'HANDLE TX BLOCK CMD%d' % self.cmd
 
     def handle_response_r1b(self, res):
         # TODO
@@ -967,15 +968,68 @@ class Decoder(srd.Decoder):
             # Wait until block transfer completed.
             if len(self.read_buf) < self.blocklen:
                 return
-            self.es_data = self.es
-            self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD24, ['Block data: %s' % self.read_buf]])
-            self.read_buf = []
-            self.state = 'DATA RESPONSE'
+            if len(self.read_buf) == self.blocklen:
+                self.es_data = self.es
+                self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD24, ['Block data: %s' % self.read_buf]])
+                self.ss_data = self.es
+            if len(self.read_buf) == self.blocklen + 1:
+                self.ss_data = self.ss
+            if len(self.read_buf) == self.blocklen + 2:
+                self.es_data = self.es
+                self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD24, ['CRC']])
+                self.read_buf = []
+                self.state = 'DATA RESPONSE'
         elif mosi == 0xfe:
             self.put(self.ss_data, self.ss, self.out_ann, [Ann.CMD24, ['Wait for response']])
             self.put(self.ss, self.es, self.out_ann, [Ann.CMD24, ['Start Block']])
             self.start_token_found = True
             self.is_first_rx = False
+        elif False == self.is_first_rx:
+            self.ss_data = self.ss
+            self.is_first_rx = True
+
+    def handle_data_cmd25(self, mosi):
+        if self.start_token_found:
+            if len(self.read_buf) == 0:
+                self.ss_data = self.ss
+                if not self.blocklen:
+                    # Assume a fixed block size when inspection of the
+                    # previous traffic did not provide the respective
+                    # parameter value.
+                    # TODO Make the default block size a user adjustable option?
+                    self.blocklen = 512
+            self.read_buf.append(mosi)
+            # Wait until block transfer completed.
+            if len(self.read_buf) < self.blocklen:
+                return
+            if len(self.read_buf) == self.blocklen:
+                self.es_data = self.es
+                self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD24, ['Block data: %s' % self.read_buf]])
+                self.ss_data = self.es
+            if len(self.read_buf) == self.blocklen + 1:
+                self.ss_data = self.ss
+            if len(self.read_buf) == self.blocklen + 2:
+                self.es_data = self.es
+                self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD24, ['CRC']])
+                self.read_buf = []
+                self.start_token_found = False
+                self.is_first_rx = True
+                self.state = 'DATA RESPONSE'
+        elif mosi == 0xfc:
+            self.put(self.ss_data, self.ss, self.out_ann, [Ann.CMD24, ['Wait for response']])
+            self.put(self.ss, self.es, self.out_ann, [Ann.CMD24, ['Start Block']])
+            self.start_token_found = True
+            self.is_first_rx = False
+        elif self.finish_token_found:
+            self.state = 'WAIT WHILE CARD BUSY'
+            self.busy_first_byte = True
+            self.is_first_rx = False
+            self.finish_token_found = False
+            self.cmd = 24
+        elif mosi == 0xfd:
+            self.put(self.ss_data, self.ss, self.out_ann, [Ann.CMD24, ['Wait for response']])
+            self.put(self.ss, self.es, self.out_ann, [Ann.CMD24, ['End Blocks']])
+            self.finish_token_found = True
         elif False == self.is_first_rx:
             self.ss_data = self.ss
             self.is_first_rx = True
@@ -1110,28 +1164,47 @@ class Decoder(srd.Decoder):
         elif miso == 0x0d:
             self.put(m[3][1], m[1][2], self.out_ann, [Ann.BIT, ['Data rejected (write error)']])
         self.put(m[0][1], m[0][2], self.out_ann, [Ann.BIT, ['Always 1']])
-        cls = Ann.CMD24 if 24 == self.cmd else None
+        cls = None
+        if 24 == self.cmd:
+            cls = Ann.CMD24
+        elif 25 == self.cmd:
+            cls = Ann.CMD25
         if cls is not None:
             self.put(self.ss, self.es, self.out_ann, [cls, ['Data Response']])
-        if 24 == self.cmd:
+        if self.cmd in (24, 25):
             # We just send a block of data to be written to the card,
             # this takes some time.
+            self.busy_first_byte = True
             self.state = 'WAIT WHILE CARD BUSY'
         else:
             self.state = 'IDLE'
 
     def wait_while_busy(self, miso):
         if miso != 0x00:
-            cls = Ann.CMD24 if 24 == self.cmd else None
+            cls = None
+            if 24 == self.cmd:
+                cls = Ann.CMD24
+            elif 25 == self.cmd:
+                cls = Ann.CMD25
             if cls is not None:
                 self.put(self.ss_busy, self.es_busy, self.out_ann, [cls, ['Card is busy']])
-            self.state = 'IDLE'
+            if 25 == self.cmd:
+                self.read_buf = []
+                self.ss_data = self.es
+                self.start_token_found = False
+                self.is_first_rx = True
+                self.state = 'HANDLE TX BLOCK CMD25'
+            else:
+                self.state = 'IDLE'
             return
         else:
             if self.busy_first_byte:
+                #self.put(self.ss, self.es, self.out_ann, [Ann.CMD24, ['First busy']])
                 self.ss_busy = self.ss
+                self.es_busy = self.es
                 self.busy_first_byte = False
             else:
+                #self.put(self.ss, self.es, self.out_ann, [Ann.CMD24, ['Still busy']])
                 self.es_busy = self.es
 
     def wait_data_response(self, miso):
@@ -1148,6 +1221,7 @@ class Decoder(srd.Decoder):
         else:
             if self.busy_first_byte:
                 self.ss_busy = self.ss
+                self.es_busy = self.es
                 self.busy_first_byte = False
             else:
                 self.es_busy = self.es
@@ -1206,6 +1280,11 @@ class Decoder(srd.Decoder):
             s = 'handle_data_%s' % self.state[16:].lower()
             handle_response = getattr(self, s)
             handle_response(miso)
+        elif self.state.startswith('HANDLE TX BLOCK'):
+            # Call the respective handler method for the sent data.
+            s = 'handle_data_%s' % self.state[16:].lower()
+            handle_response = getattr(self, s)
+            handle_response(mosi)
         elif self.state == 'WAIT DATA RESPONSE':
             self.wait_data_response(miso)
         elif self.state == 'DATA RESPONSE':
