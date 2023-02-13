@@ -607,18 +607,264 @@ class Decoder(srd.Decoder):
             self.state = 'IDLE'
 
     def handle_data_cmd9(self, miso):
-        # CMD9 returns one byte R1, then some bytes 0xff, then a Start Block
+        # CMD9 CSD returns one byte R1, then some bytes 0xff, then a Start Block
         # (single byte 0xfe), then 16 bytes of data, then always
         # 2 bytes of CRC.
         if len(self.read_buf) == 0:
             self.ss_data = self.ss
         self.read_buf.append(miso)
+        self.read_buf_bits += self.miso_bits
+
+        def putbit(bit, data):
+            b = self.read_buf_bits[bit]
+            self.ss_bit, self.es_bit = b[1], b[2]
+            self.putb([Ann.BIT, data])
+
         # Wait until block transfer completed.
         if len(self.read_buf) < 16:
             return
         if len(self.read_buf) == 16:
             self.es_data = self.es
             self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD9, ['CSD: %s' % self.read_buf]])
+
+            csd_ver = (((self.read_buf[0] & 0xC0) >> 6)+1)
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[7][1], self.read_buf_bits[6][2]
+            self.putb([Ann.BIT, ['CSD V%d.0' % csd_ver]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[5][1], self.read_buf_bits[0][2]
+            self.putb([Ann.BIT, ['Reserved']])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[8+6][1], self.read_buf_bits[8+0][2]
+            time_unit = self.read_buf[1] & 0x07
+            time_value = (self.read_buf[1] & 0x78) >> 3
+            taac = time_value
+            if (0 == time_value):
+                taac = 0.0
+            elif (1 == time_value):
+                taac = 1.0
+            elif (2 == time_value):
+                taac = 1.2
+            elif (3 == time_value):
+                taac = 1.3
+            elif (4 == time_value):
+                taac = 1.5
+            elif (5 == time_value):
+                taac = 2.0
+            elif (6 == time_value):
+                taac = 2.5
+            elif (7 == time_value):
+                taac = 3.0
+            elif (8 == time_value):
+                taac = 3.5
+            elif (9 == time_value):
+                taac = 4.0
+            elif (10 == time_value):
+                taac = 4.5
+            elif (11 == time_value):
+                taac = 5.0
+            elif (12 == time_value):
+                taac = 5.5
+            elif (13 == time_value):
+                taac = 6.0
+            elif (14 == time_value):
+                taac = 7.0
+            elif (15 == time_value):
+                taac = 8.0
+            taac *= pow(10, time_unit)
+            self.putb([Ann.BIT, ['TAAC Data read access-time-1 %dns' % taac]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[2*8+7][1], self.read_buf_bits[2*8+0][2]
+            self.putb([Ann.BIT, ['NSAC data read access-time-2 CLK cycles %d' % (self.read_buf[2] * 100)]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[3*8+6][1], self.read_buf_bits[3*8+0][2]
+            tf_rate_unit = self.read_buf[3] & 0x07
+            tf_rate_value = (self.read_buf[3] & 0x78) >> 3
+            tran_speed = tf_rate_value
+            if (0 == tf_rate_value):
+                tran_speed = 0.0
+            elif (1 == tf_rate_value):
+                tran_speed = 1.0
+            elif (2 == tf_rate_value):
+                tran_speed = 1.2
+            elif (3 == tf_rate_value):
+                tran_speed = 1.3
+            elif (4 == tf_rate_value):
+                tran_speed = 1.5
+            elif (5 == tf_rate_value):
+                tran_speed = 2.0
+            elif (6 == tf_rate_value):
+                tran_speed = 2.5
+            elif (7 == tf_rate_value):
+                tran_speed = 3.0
+            elif (8 == tf_rate_value):
+                tran_speed = 3.5
+            elif (9 == tf_rate_value):
+                tran_speed = 4.0
+            elif (10 == tf_rate_value):
+                tran_speed = 4.5
+            elif (11 == tf_rate_value):
+                tran_speed = 5.0
+            elif (12 == tf_rate_value):
+                tran_speed = 5.5
+            elif (13 == tf_rate_value):
+                tran_speed = 6.0
+            elif (14 == tf_rate_value):
+                tran_speed = 7.0
+            elif (15 == tf_rate_value):
+                tran_speed = 8.0
+            tran_speed *= pow(10, tf_rate_unit)*.1
+            self.putb([Ann.BIT, ['TRAN_SPEED Max data rate %dMHz' % tran_speed]])
+
+            s = '' if (self.read_buf[4] & (1 << 7)) else 'not '
+            putbit(4*8+7, ['CCC Class 0 %ssupported' % s])
+
+            s = '' if (self.read_buf[4] & (1 << 6)) else 'not '
+            putbit(4*8+6, ['CCC Class 1 %ssupported' % s])
+
+            s = '' if (self.read_buf[4] & (1 << 5)) else 'not '
+            putbit(4*8+5, ['CCC Class 2 %ssupported' % s])
+
+            s = '' if (self.read_buf[4] & (1 << 4)) else 'not '
+            putbit(4*8+4, ['CCC Class 3 %ssupported' % s])
+
+            s = '' if (self.read_buf[4] & (1 << 3)) else 'not '
+            putbit(4*8+3, ['CCC Class 4 %ssupported' % s])
+
+            s = '' if (self.read_buf[4] & (1 << 2)) else 'not '
+            putbit(4*8+2, ['CCC Class 5 %ssupported' % s])
+
+            s = '' if (self.read_buf[4] & (1 << 1)) else 'not '
+            putbit(4*8+1, ['CCC Class 6 %ssupported' % s])
+
+            s = '' if (self.read_buf[4] & (1 << 0)) else 'not '
+            putbit(4*8+0, ['CCC Class 7 %ssupported' % s])
+
+            s = '' if (self.read_buf[5] & (1 << 7)) else 'not '
+            putbit(5*8+7, ['CCC Class 8 %ssupported' % s])
+
+            s = '' if (self.read_buf[5] & (1 << 6)) else 'not '
+            putbit(5*8+6, ['CCC Class 9 %ssupported' % s])
+
+            s = '' if (self.read_buf[5] & (1 << 5)) else 'not '
+            putbit(5*8+5, ['CCC Class 10 %ssupported' % s])
+
+            s = '' if (self.read_buf[5] & (1 << 4)) else 'not '
+            putbit(5*8+4, ['CCC Class 11 %ssupported' % s])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[5*8+3][1], self.read_buf_bits[5*8+0][2]
+            read_bl_len = (self.read_buf[5] & 0xf)
+            read_bl_len = pow(2, read_bl_len)
+            self.putb([Ann.BIT, ['READ_BL_LEN %d' % read_bl_len]])
+
+            s = '' if (self.read_buf[6] & (1 << 7)) else 'not '
+            putbit(6*8+7, ['READ_BL_PARTIAL %sallowed' % s])
+
+            s = '' if (self.read_buf[6] & (1 << 6)) else 'not '
+            putbit(6*8+6, ['WRITE_BLK_MISALIGN %sallowed' % s])
+
+            s = '' if (self.read_buf[6] & (1 << 5)) else 'not '
+            putbit(6*8+5, ['READ_BLK_MISALIGN %sallowed' % s])
+
+            s = '' if (self.read_buf[6] & (1 << 4)) else 'not '
+            putbit(6*8+4, ['DSR_IMP configurable driver %simplemented' % s])
+
+            if (1 == csd_ver):
+                self.ss_bit, self.es_bit = self.read_buf_bits[6*8+3][1], self.read_buf_bits[6*8+2][2]
+                self.putb([Ann.BIT, ['Reserved']])
+
+                self.ss_bit, self.es_bit = self.read_buf_bits[9*8+1][1], self.read_buf_bits[10*8+7][2]
+                c_size_mult = ((self.read_buf[9] & 0x3) << 1) + ((self.read_buf[10] & 0x80) >> 7)
+                c_size_mult = pow(2, c_size_mult + 2)
+                self.putb([Ann.BIT, ['C_SIZE_MULT %d' % c_size_mult]])
+
+                self.ss_bit, self.es_bit = self.read_buf_bits[6*8+1][1], self.read_buf_bits[8*8+6][2]
+                c_size = ((self.read_buf[6] & 0x3) << 10) + ((self.read_buf[7] & 0xff) << 2) + ((self.read_buf[8] & 0xC0) >> 6)
+                c_size *= read_bl_len * c_size_mult
+                self.putb([Ann.BIT, ['C_SIZE %d+1 sectors %.2fGB' % (c_size, (c_size * read_bl_len * c_size_mult) / (1024 * 1024))]])
+
+                self.ss_bit, self.es_bit = self.read_buf_bits[8*8+5][1], self.read_buf_bits[9*8+2][2]
+                self.putb([Ann.BIT, ['Card max currents']])
+
+            elif (2 == csd_ver):
+                self.ss_bit, self.es_bit = self.read_buf_bits[6*8+3][1], self.read_buf_bits[7*8+6][2]
+                self.putb([Ann.BIT, ['Reserved']])
+
+                self.ss_bit, self.es_bit = self.read_buf_bits[7*8+5][1], self.read_buf_bits[9*8+0][2]
+                c_size = ((self.read_buf[7] & 0x3f) << 16) + ((self.read_buf[8] & 0xff) << 8) + ((self.read_buf[9] & 0xff))
+                self.putb([Ann.BIT, ['C_SIZE %d+1 sectors %.2fGB' % (c_size, (c_size+1) / 2048)]])
+
+                putbit(10*8+7, ['Reserved'])
+
+            s = '' if (self.read_buf[10] & (1 << 6)) else 'not '
+            putbit(10*8+6, ['ERASE_BLK_EN Erase single block %senabled' % s])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[10*8+5][1], self.read_buf_bits[11*8+7][2]
+            wp_grp_size = ((self.read_buf[10] & 0x3f) << 1) + ((self.read_buf[11] & 0x80) >> 7)
+            self.putb([Ann.BIT, ['ERASE_SECTOR_SIZE %d+1 sectors' % wp_grp_size]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[11*8+6][1], self.read_buf_bits[11*8+0][2]
+            wp_grp_size = ((self.read_buf[11] & 0x7f))
+            self.putb([Ann.BIT, ['WP_GRP_SIZE %d+1 sectors' % wp_grp_size]])
+
+            s = '' if (self.read_buf[12] & (1 << 7)) else 'not '
+            putbit(12*8+7, ['WP_GRP_ENABLE Group Write Protect %senabled' % s])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[12*8+6][1], self.read_buf_bits[12*8+5][2]
+            self.putb([Ann.BIT, ['Reserved']])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[12*8+4][1], self.read_buf_bits[12*8+2][2]
+            r2w_factor = ((self.read_buf[12] & 0x1C) >> 2)
+            r2w_factor = pow(2, r2w_factor)
+            self.putb([Ann.BIT, ['R2W_FACTOR %d' % r2w_factor]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[12*8+1][1], self.read_buf_bits[13*8+6][2]
+            write_bl_len = ((self.read_buf[12] & 0x3) << 2) + ((self.read_buf[13] & 0xC0) >> 6)
+            write_bl_len = pow(2, write_bl_len)
+            self.putb([Ann.BIT, ['WRITE_BL_LEN %d' % write_bl_len]])
+
+            s = '' if (self.read_buf[13] & (1 << 5)) else 'not '
+            putbit(13*8+5, ['WRITE_BL_PARTIAL Partial Block write %senabled' % s])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[13*8+4][1], self.read_buf_bits[13*8+0][2]
+            self.putb([Ann.BIT, ['Reserved']])
+
+            file_format_grp = 1 if (self.read_buf[14] & (1 << 7)) else 0
+            putbit(14*8+7, ['FILE_FORMAT_GRP %d' % file_format_grp])
+
+            s = 'copied' if (self.read_buf[14] & (1 << 6)) else 'original'
+            putbit(14*8+6, ['COPY Contents are %s' % s])
+
+            s = 'P' if (self.read_buf[14] & (1 << 5)) else 'Not p'
+            putbit(14*8+5, ['PERM_WRITE_PROTECT %sermanently write protected' % s])
+
+            s = 'W' if (self.read_buf[14] & (1 << 4)) else 'Not w'
+            putbit(14*8+4, ['TMP_WRITE_PROTECT %srite protected' % s])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[14*8+3][1], self.read_buf_bits[14*8+2][2]
+            file_format = ((self.read_buf[14] & 0xC) >> 2)
+            if (0 == file_format):
+                s = 'Hard disk-like with partition table'
+            elif (1 == file_format):
+                s = 'DOS FAT floppy like with boot sector only, no partition table'
+            elif (2 == file_format):
+                s = 'Universal File Format'
+            elif (3 == file_format):
+                s = 'Others/Unknown'
+            self.putb([Ann.BIT, ['FILE_FORMAT %d %s' % (file_format, s)]])
+
+            s = 'W' if (self.read_buf[14] & (1 << 1)) else 'Not w'
+            putbit(14*8+1, ['WP_UPC %srite protected until power cycle' % s])
+
+            putbit(14*8+0, ['Reserved'])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[15*8+7][1], self.read_buf_bits[15*8+2][2]
+            self.putb([Ann.BIT, ['CRC7 0x%02x' % ((self.read_buf[15] & 0xfe) >> 1)]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[15*8+1][1], self.read_buf_bits[15*8+0][2]
+            self.putb([Ann.BIT, ['Always 1']])
+
+
         elif len(self.read_buf) == (16 + 1):
             self.ss_crc = self.ss
         elif len(self.read_buf) == (16 + 2):
@@ -635,7 +881,6 @@ class Decoder(srd.Decoder):
         if len(self.read_buf) == 0:
             self.ss_data = self.ss
         self.read_buf.append(miso)
-        #self.read_buf_bits.append(self.miso_bits)
         self.read_buf_bits += self.miso_bits
         # Wait until block transfer completed.
         if len(self.read_buf) < 16:
@@ -742,12 +987,94 @@ class Decoder(srd.Decoder):
         if len(self.read_buf) == 0:
             self.ss_data = self.ss
         self.read_buf.append(miso)
+        self.read_buf_bits += self.miso_bits
         # Wait until block transfer completed.
         if len(self.read_buf) < 8:
             return
         if len(self.read_buf) == 8:
             self.es_data = self.es
-            self.put(self.ss_data, self.es_data, self.out_ann, [Ann.ACMD51, ['Block data: %s' % self.read_buf]])
+            self.put(self.ss_data, self.es_data, self.out_ann, [Ann.ACMD51, ['SCR SD Card Configuration Register: %s' % self.read_buf]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[7][1], self.read_buf_bits[4][2]
+            scr_structure = ((self.read_buf[0] & 0xf0) >> 4) + 1
+            self.putb([Ann.BIT, ['SCR V%d.0' % scr_structure]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[3][1], self.read_buf_bits[0][2]
+            sd_spec = (self.read_buf[0] & 0xf)
+            self.putb([Ann.BIT, ['SD_SPEC %d' % sd_spec]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[1*8+7][1], self.read_buf_bits[1*8+7][2]
+            self.putb([Ann.BIT, ['DATA_STAT_AFTER_ERASE %d' % ((self.read_buf[1] & 0x80) >> 7)]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[1*8+6][1], self.read_buf_bits[1*8+4][2]
+            sd_security = ((self.read_buf[1] & 0x70) >> 4)
+            s = 'Reserved'
+            if (0 == sd_security):
+                s = 'No Security'
+            elif (1 == sd_security):
+                s = 'Not Used'
+            elif (2 == sd_security):
+                s = 'SDSC Card (Security Version 1.01)'
+            elif (3 == sd_security):
+                s = 'SDHC Card (Security Version 2.00)'
+            elif (4 == sd_security):
+                s = 'SDXC Card (Security Version 3.xx)'
+            self.putb([Ann.BIT, ['SD_SECURITY %d %s' % (sd_security, s)]])
+
+            #self.ss_bit, self.es_bit = self.read_buf_bits[1*8+3][1], self.read_buf_bits[1*8+0][2]
+            #self.putb([Ann.BIT, ['SD_BUS_WIDTHS']])
+            self.ss_bit, self.es_bit = self.read_buf_bits[1*8+0][1], self.read_buf_bits[1*8+0][2]
+            s = '' if (self.read_buf[1] & (1 << 0)) else 'not '
+            self.putb([Ann.BIT, ['SD_BUS_WIDTHS 1-bit %ssupported' % s]])
+            self.ss_bit, self.es_bit = self.read_buf_bits[1*8+1][1], self.read_buf_bits[1*8+1][2]
+            self.putb([Ann.BIT, ['SD_BUS_WIDTHS Reserved']])
+            self.ss_bit, self.es_bit = self.read_buf_bits[1*8+2][1], self.read_buf_bits[1*8+2][2]
+            s = '' if (self.read_buf[1] & (1 << 2)) else 'not '
+            self.putb([Ann.BIT, ['SD_BUS_WIDTHS 4-bit %ssupported' % s]])
+            self.ss_bit, self.es_bit = self.read_buf_bits[1*8+3][1], self.read_buf_bits[1*8+3][2]
+            self.putb([Ann.BIT, ['SD_BUS_WIDTHS Reserved']])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[2*8+7][1], self.read_buf_bits[2*8+7][2]
+            sd_spec3 = ((self.read_buf[2] & 0x80) >> 7)
+            self.putb([Ann.BIT, ['SD_SPEC3 %d' % sd_spec3]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[2*8+6][1], self.read_buf_bits[2*8+3][2]
+            ex_security = ((self.read_buf[2] & 0x78) >> 3)
+            self.putb([Ann.BIT, ['EX_SECURITY %d' % ex_security]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[2*8+2][1], self.read_buf_bits[2*8+2][2]
+            sd_spec4 = ((self.read_buf[2] & 0x4) >> 2)
+            self.putb([Ann.BIT, ['SD_SPEC4 %d' % sd_spec4]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[2*8+1][1], self.read_buf_bits[3*8+6][2]
+            sd_specx = ((self.read_buf[2] & 0x3) << 2) + ((self.read_buf[3] & 0xC0) >> 6)
+            self.putb([Ann.BIT, ['SD_SPECX %d' % sd_specx]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[3*8+5][1], self.read_buf_bits[3*8+5][2]
+            self.putb([Ann.BIT, ['Reserved']])
+
+            #self.ss_bit, self.es_bit = self.read_buf_bits[3*8+4][1], self.read_buf_bits[3*8+0][2]
+            #self.putb([Ann.BIT, ['CMD_SUPPORT']])
+            self.ss_bit, self.es_bit = self.read_buf_bits[3*8+4][1], self.read_buf_bits[3*8+4][2]
+            s = '' if (self.read_buf[3] & (1 << 4)) else 'not '
+            self.putb([Ann.BIT, ['CMD_SUPPORT Secure Rx/Tx ACMD53/54 %ssupported' % s]])
+            self.ss_bit, self.es_bit = self.read_buf_bits[3*8+3][1], self.read_buf_bits[3*8+3][2]
+            s = '' if (self.read_buf[3] & (1 << 3)) else 'not '
+            self.putb([Ann.BIT, ['CMD_SUPPORT Extension Register Multi-block CMD58/59 %ssupported' % s]])
+            self.ss_bit, self.es_bit = self.read_buf_bits[3*8+2][1], self.read_buf_bits[3*8+2][2]
+            s = '' if (self.read_buf[3] & (1 << 2)) else 'not '
+            self.putb([Ann.BIT, ['CMD_SUPPORT Extension Register Single Block CMD48/49 %ssupported' % s]])
+            self.ss_bit, self.es_bit = self.read_buf_bits[3*8+1][1], self.read_buf_bits[3*8+1][2]
+            s = '' if (self.read_buf[3] & (1 << 1)) else 'not '
+            self.putb([Ann.BIT, ['CMD_SUPPORT Set Block Count CMD23 %ssupported' % s]])
+            self.ss_bit, self.es_bit = self.read_buf_bits[3*8+0][1], self.read_buf_bits[3*8+0][2]
+            s = '' if (self.read_buf[3] & (1 << 0)) else 'not '
+            self.putb([Ann.BIT, ['CMD_SUPPORT Speed Class Control CMD20 %ssupported' % s]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[4*8+7][1], self.read_buf_bits[7*8+0][2]
+            self.putb([Ann.BIT, ['Reserved']])
+
+
         elif len(self.read_buf) == (8 + 1):
             self.ss_crc = self.ss
         elif len(self.read_buf) == (8 + 2):
