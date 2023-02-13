@@ -64,6 +64,7 @@ class Decoder(srd.Decoder):
         self.is_acmd = 0 # Indicates CMD vs. ACMD
         self.blocklen = 0
         self.read_buf = []
+        self.read_buf_bits = []
         self.cmd_str = ''
         self.cmd = 0
         self.r1 = 0
@@ -462,6 +463,11 @@ class Decoder(srd.Decoder):
         # The R3 response token format (1+4 bytes).
         # Sent by the card after CMD58 READ_OCR
 
+        def putbit(bit, data):
+            b = self.miso_bits[bit]
+            self.ss_bit, self.es_bit = b[1], b[2]
+            self.putb([Ann.BIT, data])
+
         if len(self.read_buf) == 0:
             # Ignore leading 0xff bytes before get R1 byte. Can get 1-8 of these.
             if res == 0xff:
@@ -471,11 +477,6 @@ class Decoder(srd.Decoder):
             self.ss_r = self.miso_bits[0][2]
             self.ss_cmd, self.es_cmd = self.miso_bits[7][1], self.miso_bits[0][2]
             self.putx([Ann.R1, ['R1: 0x%02x' % res]])
-
-            def putbit(bit, data):
-                b = self.miso_bits[bit]
-                self.ss_bit, self.es_bit = b[1], b[2]
-                self.putb([Ann.BIT, data])
 
             # Bit 0: 'In idle state' bit
             s = '' if (res & (1 << 0)) else 'not '
@@ -507,6 +508,60 @@ class Decoder(srd.Decoder):
 
             # Bit 7: Always set to 0
             putbit(7, ['Bit 7 (always 0)'])
+
+        if len(self.read_buf) == 1:
+            s = 'READY' if (res & (1 << 7)) else 'BUSY'
+            putbit(7, ['Power-Up Status Bit %s' % s])
+
+            s = 'HC/XC' if (res & (1 << 6)) else 'SC'
+            putbit(6, ['Card Capacity Status %s' % s])
+
+            self.ss_bit, self.es_bit = self.miso_bits[5][1], self.miso_bits[1][2]
+            self.putb([Ann.BIT, ['Reserved']])
+
+            s = '' if (res & (1 << 0)) else 'Not '
+            putbit(0, ['%s1.8V Tolerant' % s])
+
+        if len(self.read_buf) == 2:
+            s = '' if (res & (1 << 7)) else 'not '
+            putbit(7, ['3.6-3.5V %sOK' % s])
+
+            s = '' if (res & (1 << 6)) else 'not '
+            putbit(6, ['3.5-3.4V %sOK' % s])
+
+            s = '' if (res & (1 << 5)) else 'not '
+            putbit(5, ['3.4-3.3V %sOK' % s])
+
+            s = '' if (res & (1 << 4)) else 'not '
+            putbit(4, ['3.3-3.2V %sOK' % s])
+
+            s = '' if (res & (1 << 3)) else 'not '
+            putbit(3, ['3.2-3.1V %sOK' % s])
+
+            s = '' if (res & (1 << 2)) else 'not '
+            putbit(2, ['3.1-3.0V %sOK' % s])
+
+            s = '' if (res & (1 << 1)) else 'not '
+            putbit(1, ['3.0-2.9V %sOK' % s])
+
+            s = '' if (res & (1 << 0)) else 'not '
+            putbit(0, ['2.9-2.8V %sOK' % s])
+
+        if len(self.read_buf) == 3:
+            s = '' if (res & (1 << 7)) else 'not '
+            putbit(7, ['2.8-2.7V %sOK' % s])
+
+            self.ss_bit, self.es_bit = self.miso_bits[6][1], self.miso_bits[0][2]
+            self.putb([Ann.BIT, ['Reserved']])
+
+        if len(self.read_buf) == 4:
+            putbit(7, ['Reserved Low Voltage'])
+
+            self.ss_bit, self.es_bit = self.miso_bits[6][1], self.miso_bits[4][2]
+            self.putb([Ann.BIT, ['Reserved']])
+
+            self.ss_bit, self.es_bit = self.miso_bits[3][1], self.miso_bits[0][2]
+            self.putb([Ann.BIT, ['Reserved']])
 
         self.read_buf.append(res)
         if len(self.read_buf) < 5:
@@ -580,12 +635,43 @@ class Decoder(srd.Decoder):
         if len(self.read_buf) == 0:
             self.ss_data = self.ss
         self.read_buf.append(miso)
+        #self.read_buf_bits.append(self.miso_bits)
+        self.read_buf_bits += self.miso_bits
         # Wait until block transfer completed.
         if len(self.read_buf) < 16:
             return
         if len(self.read_buf) == 16:
             self.es_data = self.es
             self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD10, ['CID: %s' % self.read_buf]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[7][1], self.read_buf_bits[0][2]
+            self.putb([Ann.BIT, ['Manufacturer ID 0x%02x' % self.read_buf[0]]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[1*8+7][1], self.read_buf_bits[2*8+0][2]
+            self.putb([Ann.BIT, ['OEM ID \'%c%c\'' % (self.read_buf[1], self.read_buf[2])]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[3*8+7][1], self.read_buf_bits[7*8+0][2]
+            self.putb([Ann.BIT, ['PNM Product Name \'%c%c%c%c%c\'' % (self.read_buf[3], self.read_buf[4], self.read_buf[5], self.read_buf[6], self.read_buf[7])]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[8*8+7][1], self.read_buf_bits[8*8+0][2]
+            self.putb([Ann.BIT, ['PRV Product Revision %d.%d' % ((self.read_buf[8] & 0xf0) >> 4, self.read_buf[8] & 0xf)]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[9*8+7][1], self.read_buf_bits[12*8][2]
+            self.putb([Ann.BIT, ['PSN Serial No 0x%02x%02x%02x%02x' % (self.read_buf[9], self.read_buf[10], self.read_buf[11], self.read_buf[12])]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[13*8+7][1], self.read_buf_bits[13*8+4][2]
+            self.putb([Ann.BIT, ['Reserved 0x%x' % ((self.read_buf[13] & 0xf0) >> 4)]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[13*8+3][1], self.read_buf_bits[14*8+0][2]
+            self.putb([Ann.BIT, ['Mfg Date %d/2%03d' % ((self.read_buf[14] & 0xf), ((self.read_buf[13] & 0xf) << 4) + ((self.read_buf[14] & 0xf0) >> 4))]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[15*8+7][1], self.read_buf_bits[15*8+2][2]
+            self.putb([Ann.BIT, ['CRC7 0x%02x' % ((self.read_buf[15] & 0xfe) >> 1)]])
+
+            self.ss_bit, self.es_bit = self.read_buf_bits[15*8+1][1], self.read_buf_bits[15*8+0][2]
+            self.putb([Ann.BIT, ['Always 1']])
+
+
         elif len(self.read_buf) == (16 + 1):
             self.ss_crc = self.ss
         elif len(self.read_buf) == (16 + 2):
@@ -757,6 +843,7 @@ class Decoder(srd.Decoder):
         # State machine.
         if self.state == 'IDLE':
             self.read_buf = []
+            self.read_buf_bits = []
             # Ignore stray 0xff bytes, some devices seem to send those!?
             if mosi == 0xff: # TODO?
                 return
