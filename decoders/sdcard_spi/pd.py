@@ -57,17 +57,18 @@ class Decoder(srd.Decoder):
         self.ss, self.es = 0, 0
         self.ss_bit, self.es_bit = 0, 0
         self.ss_cmd, self.es_cmd = 0, 0
+        self.ss_r, self.es_r = 0, 0
         self.ss_busy, self.es_busy = 0, 0
         self.cmd_token = []
         self.cmd_token_bits = []
-        self.is_acmd = False # Indicates CMD vs. ACMD
+        self.is_acmd = 0 # Indicates CMD vs. ACMD
         self.blocklen = 0
         self.read_buf = []
         self.cmd_str = ''
-        self.is_cmd24 = False
-        self.cmd24_start_token_found = False
-        self.is_cmd17 = False
-        self.cmd17_start_token_found = False
+        self.cmd = 0
+        self.r1 = 0
+        self.start_token_found = False
+        self.is_first_rx = False
         self.busy_first_byte = False
 
     def start(self):
@@ -137,9 +138,9 @@ class Decoder(srd.Decoder):
             self.putb([Ann.BIT_WARNING, ['Transmitter bit: %d (Warning: Must be 1!)' % bit]])
 
         # Bits[45:40]: Command index (BCD; valid: 0-63)
-        cmd = self.cmd_index = t[0] & 0x3f
+        self.cmd = self.cmd_index = t[0] & 0x3f
         self.ss_bit, self.es_bit = tb(5, 5)[1], tb(5, 0)[2]
-        self.putb([Ann.BIT, ['Command: %s%d (%s)' % (s, cmd, self.cmd_name(cmd))]])
+        self.putb([Ann.BIT, ['Command: %s%d (%s)' % (s, self.cmd, self.cmd_name(self.cmd))]])
 
         # Bits[39:8]: Argument
         self.arg = (t[1] << 24) | (t[2] << 16) | (t[3] << 8) | t[4]
@@ -160,13 +161,13 @@ class Decoder(srd.Decoder):
             self.putb([Ann.BIT_WARNING, ['End bit: %d (Warning: Must be 1!)' % bit]])
 
         # Handle command.
-        if cmd in (0, 1, 9, 16, 17, 24, 41, 49, 55, 59):
-            self.state = 'HANDLE CMD%d' % cmd
-            self.cmd_str = '%s%d (%s)' % (s, cmd, self.cmd_name(cmd))
+        if self.cmd in (0, 1, 6, 9, 10, 13, 16, 17, 24, 41, 49, 51, 55, 58, 59):
+            self.state = 'HANDLE CMD%d' % self.cmd
+            self.cmd_str = '%s%d (%s)' % (s, self.cmd, self.cmd_name(self.cmd))
         else:
             self.state = 'HANDLE CMD999'
-            a = '%s%d: %02x %02x %02x %02x %02x %02x' % ((s, cmd) + tuple(t))
-            self.putx([cmd, [a]])
+            a = '%s%d: %02x %02x %02x %02x %02x %02x' % ((s, self.cmd) + tuple(t))
+            self.putx([self.cmd, [a]])
 
     def handle_cmd0(self):
         # CMD0: GO_IDLE_STATE
@@ -182,34 +183,26 @@ class Decoder(srd.Decoder):
         self.putb([Ann.BIT, ['HCS: %d' % hcs]])
         self.state = 'GET RESPONSE R1'
 
+    def handle_cmd6(self):
+        # CMD6: SWITCH_FUNC (64 bits / 8 bytes)
+        self.putc(Ann.CMD6, 'Check switchable mode and check switch function')
+        self.state = 'GET RESPONSE R1'
+        #self.state = 'IDLE'
+
     def handle_cmd9(self):
         # CMD9: SEND_CSD (128 bits / 16 bytes)
         self.putc(Ann.CMD9, 'Ask card to send its card specific data (CSD)')
-        if len(self.read_buf) == 0:
-            self.ss_cmd = self.ss
-        self.read_buf.append(self.miso)
-        # FIXME
-        ### if len(self.read_buf) < 16:
-        if len(self.read_buf) < 16 + 4:
-            return
-        self.es_cmd = self.es
-        self.read_buf = self.read_buf[4:] # TODO: Document or redo.
-        self.putx([Ann.CMD9, ['CSD: %s' % self.read_buf]])
-        # TODO: Decode all bits.
-        self.read_buf = []
-        ### self.state = 'GET RESPONSE R1'
-        self.state = 'IDLE'
+        self.state = 'GET RESPONSE R1'
 
     def handle_cmd10(self):
         # CMD10: SEND_CID (128 bits / 16 bytes)
-        self.putc(Ann.CMD10, 'Ask card to send its card identification (CID)')
-        self.read_buf.append(self.miso)
-        if len(self.read_buf) < 16:
-            return
-        self.putx([Ann.CMD10, ['CID: %s' % self.read_buf]])
-        # TODO: Decode all bits.
-        self.read_buf = []
+        self.putc(Ann.CMD10, 'Ask card to send its card ID (CID)')
         self.state = 'GET RESPONSE R1'
+
+    def handle_cmd13(self):
+        # CMD13: SEND_STATUS
+        self.putc(Ann.CMD13, 'Ask card to send the Status register')
+        self.state = 'GET RESPONSE R2'
 
     def handle_cmd16(self):
         # CMD16: SET_BLOCKLEN
@@ -221,13 +214,11 @@ class Decoder(srd.Decoder):
     def handle_cmd17(self):
         # CMD17: READ_SINGLE_BLOCK
         self.putc(Ann.CMD17, 'Read a block from address 0x%04x' % self.arg)
-        self.is_cmd17 = True
         self.state = 'GET RESPONSE R1'
 
     def handle_cmd24(self):
         # CMD24: WRITE_BLOCK
         self.putc(Ann.CMD24, 'Write a block to address 0x%04x' % self.arg)
-        self.is_cmd24 = True
         self.state = 'GET RESPONSE R1'
 
     def handle_cmd49(self):
@@ -236,8 +227,13 @@ class Decoder(srd.Decoder):
     def handle_cmd55(self):
         # CMD55: APP_CMD
         self.putc(Ann.CMD55, 'Next command is an application-specific command')
-        self.is_acmd = True
+        self.is_acmd = 1
         self.state = 'GET RESPONSE R1'
+
+    def handle_cmd58(self):
+        # CMD58: SEND_OCR (128 bits / 16 bytes)
+        self.putc(Ann.CMD10, 'Ask card to send the OCR register')
+        self.state = 'GET RESPONSE R3'
 
     def handle_cmd59(self):
         # CMD59: CRC_ON_OFF
@@ -251,7 +247,16 @@ class Decoder(srd.Decoder):
         self.putc(Ann.ACMD41, 'Send HCS info and activate the card init process')
         self.state = 'GET RESPONSE R1'
 
+    def handle_acmd51(self):
+        # ACMD51: SEND_SCR (64 bits / 8 bytes)
+        self.putc(Ann.ACMD51, 'Ask card to send its SCR register')
+        self.state = 'GET RESPONSE R1'
+        #self.state = 'IDLE'
+
     def handle_cmd999(self):
+        self.state = 'GET RESPONSE R1'
+
+    def handle_acmd999(self):
         self.state = 'GET RESPONSE R1'
 
     def handle_cid_register(self):
@@ -295,7 +300,13 @@ class Decoder(srd.Decoder):
         # The R1 response token format (1 byte).
         # Sent by the card after every command except for SEND_STATUS.
 
+        # Ignore leading 0xff bytes before get R1 byte. Can get 1-8 of these.
+        if res == 0xff:
+            return
+
+        self.r1 = res
         self.ss_cmd, self.es_cmd = self.miso_bits[7][1], self.miso_bits[0][2]
+        self.ss_r, self.es_r = self.ss_cmd, self.es_cmd
         self.putx([Ann.R1, ['R1: 0x%02x' % res]])
 
         def putbit(bit, data):
@@ -324,32 +335,191 @@ class Decoder(srd.Decoder):
         putbit(4, ['%srror in the sequence of erase commands' % s])
 
         # Bit 5: 'Address error' bit
-        s = 'M' if (res & (1 << 4)) else 'No m'
+        s = 'M' if (res & (1 << 5)) else 'No m'
         putbit(5, ['%sisaligned address used in command' % s])
 
         # Bit 6: 'Parameter error' bit
-        s = '' if (res & (1 << 4)) else 'not '
+        s = '' if (res & (1 << 6)) else 'not '
         putbit(6, ['Command argument %soutside allowed range' % s])
 
         # Bit 7: Always set to 0
         putbit(7, ['Bit 7 (always 0)'])
 
-        if self.is_cmd17:
-            self.state = 'HANDLE DATA BLOCK CMD17'
-        if self.is_cmd24:
+        if (res & (1 << 2)) or (res & (1 << 3)) or (res & (1 << 5)) or (res & (1 << 6)):
+            self.state = 'IDLE'
+            return;
+
+        if (not self.is_acmd) and (self.cmd in (6, 9, 10, 17)):
+            self.state = 'WAIT DATA RESPONSE'
+        elif (self.is_acmd) and (self.cmd == 51):
+            self.state = 'WAIT DATA RESPONSE'
+        elif (24 == self.cmd):
             self.state = 'HANDLE DATA BLOCK CMD24'
 
     def handle_response_r1b(self, res):
         # TODO
         pass
 
+
     def handle_response_r2(self, res):
-        # TODO
-        pass
+        # The R2 response token format (1+1 bytes).
+        # Sent by the card after CMD58 SEND_STATUS
+
+        def putbit(bit, data):
+            b = self.miso_bits[bit]
+            self.ss_bit, self.es_bit = b[1], b[2]
+            self.putb([Ann.BIT, data])
+
+        if len(self.read_buf) == 0:
+            # Ignore leading 0xff bytes before get R1 byte. Can get 1-8 of these.
+            if res == 0xff:
+                return
+
+            self.r1 = res
+            self.ss_r = self.miso_bits[0][2]
+            self.ss_cmd, self.es_cmd = self.miso_bits[7][1], self.miso_bits[0][2]
+            self.putx([Ann.R1, ['R1: 0x%02x' % res]])
+
+            # Bit 0: 'In idle state' bit
+            s = '' if (res & (1 << 0)) else 'not '
+            putbit(0, ['Card is %sin idle state' % s])
+
+            # Bit 1: 'Erase reset' bit
+            s = '' if (res & (1 << 1)) else 'not '
+            putbit(1, ['Erase sequence %scleared' % s])
+
+            # Bit 2: 'Illegal command' bit
+            s = 'I' if (res & (1 << 2)) else 'No i'
+            putbit(2, ['%sllegal command detected' % s])
+
+            # Bit 3: 'Communication CRC error' bit
+            s = 'failed' if (res & (1 << 3)) else 'was successful'
+            putbit(3, ['CRC check of last command %s' % s])
+
+            # Bit 4: 'Erase sequence error' bit
+            s = 'E' if (res & (1 << 4)) else 'No e'
+            putbit(4, ['%srror in the sequence of erase commands' % s])
+
+            # Bit 5: 'Address error' bit
+            s = 'M' if (res & (1 << 4)) else 'No m'
+            putbit(5, ['%sisaligned address used in command' % s])
+
+            # Bit 6: 'Parameter error' bit
+            s = '' if (res & (1 << 4)) else 'not '
+            putbit(6, ['Command argument %soutside allowed range' % s])
+
+            # Bit 7: Always set to 0
+            putbit(7, ['Bit 7 (always 0)'])
+
+        self.read_buf.append(res)
+        if len(self.read_buf) < 2:
+            self.state = 'GET RESPONSE R2'
+            return
+
+        t = self.read_buf
+        r2 = t[1]
+
+        self.ss_cmd, self.es_cmd = self.ss_r, self.miso_bits[0][2]
+        self.putx([Ann.R2, ['R2: 0x%02x' % r2]])
+
+        # Bit 0: 'Card is locked' bit
+        s = '' if (res & (1 << 0)) else 'not '
+        putbit(0, ['Card is %slocked' % s])
+
+        # Bit 1: 'Write Protect erase skip | lock/unlock command failed' bit
+        s = '' if (res & (1 << 1)) else 'not '
+        putbit(1, ['Write Protect Erase Skip/Lock/Unlock command %sfailed' % s])
+
+        # Bit 2: 'Error' bit
+        s = 'E' if (res & (1 << 2)) else 'No e'
+        putbit(2, ['%srror' % s])
+
+        # Bit 3: 'Card controller error' bit
+        s = 'C' if (res & (1 << 3)) else 'No c'
+        putbit(3, ['%sard controller error' % s])
+
+        # Bit 4: 'ECC Failed' bit
+        s = '' if (res & (1 << 4)) else 'No '
+        putbit(4, ['%sECC Failed' % s])
+
+        # Bit 5: 'Write Protect Violation' bit
+        s = 'W' if (res & (1 << 5)) else 'No w'
+        putbit(5, ['%srite protect violation' % s])
+
+        # Bit 6: 'Erase param' bit
+        s = 'I' if (res & (1 << 6)) else 'No i'
+        putbit(6, ['%snvalid selection for erase, sectors or groups' % s])
+
+        # Bit 7: 'Out of Range | CSD overwrite'
+        s = 'O' if (res & (1 << 7)) else 'Not o'
+        putbit(7, ['%sut of Range | CSD overwrite' % s])
+
+        self.state = 'IDLE'
+        self.read_buf = []
+
 
     def handle_response_r3(self, res):
-        # TODO
-        pass
+        # The R3 response token format (1+4 bytes).
+        # Sent by the card after CMD58 READ_OCR
+
+        if len(self.read_buf) == 0:
+            # Ignore leading 0xff bytes before get R1 byte. Can get 1-8 of these.
+            if res == 0xff:
+                return
+
+            self.r1 = res
+            self.ss_r = self.miso_bits[0][2]
+            self.ss_cmd, self.es_cmd = self.miso_bits[7][1], self.miso_bits[0][2]
+            self.putx([Ann.R1, ['R1: 0x%02x' % res]])
+
+            def putbit(bit, data):
+                b = self.miso_bits[bit]
+                self.ss_bit, self.es_bit = b[1], b[2]
+                self.putb([Ann.BIT, data])
+
+            # Bit 0: 'In idle state' bit
+            s = '' if (res & (1 << 0)) else 'not '
+            putbit(0, ['Card is %sin idle state' % s])
+
+            # Bit 1: 'Erase reset' bit
+            s = '' if (res & (1 << 1)) else 'not '
+            putbit(1, ['Erase sequence %scleared' % s])
+
+            # Bit 2: 'Illegal command' bit
+            s = 'I' if (res & (1 << 2)) else 'No i'
+            putbit(2, ['%sllegal command detected' % s])
+
+            # Bit 3: 'Communication CRC error' bit
+            s = 'failed' if (res & (1 << 3)) else 'was successful'
+            putbit(3, ['CRC check of last command %s' % s])
+
+            # Bit 4: 'Erase sequence error' bit
+            s = 'E' if (res & (1 << 4)) else 'No e'
+            putbit(4, ['%srror in the sequence of erase commands' % s])
+
+            # Bit 5: 'Address error' bit
+            s = 'M' if (res & (1 << 5)) else 'No m'
+            putbit(5, ['%sisaligned address used in command' % s])
+
+            # Bit 6: 'Parameter error' bit
+            s = '' if (res & (1 << 6)) else 'not '
+            putbit(6, ['Command argument %soutside allowed range' % s])
+
+            # Bit 7: Always set to 0
+            putbit(7, ['Bit 7 (always 0)'])
+
+        self.read_buf.append(res)
+        if len(self.read_buf) < 5:
+            self.state = 'GET RESPONSE R3'
+            return
+
+        t = self.read_buf
+        r3 = (t[3] << 24) | (t[2] << 16) | (t[1] << 8) | t[0]
+
+        self.ss_cmd, self.es_cmd = self.ss_r, self.miso_bits[0][2]
+        self.putx([Ann.R3, ['R3: 0x%08x' % r3]])
+        self.state = 'IDLE'
+        self.read_buf = []
 
     # Note: Response token formats R4 and R5 are reserved for SDIO.
 
@@ -359,38 +529,101 @@ class Decoder(srd.Decoder):
         # TODO
         pass
 
+    def handle_data_cmd6(self, miso):
+        # CMD6 returns one byte R1, then some bytes 0xff, then a Start Block
+        # (single byte 0xfe), then 64 bytes of data, then always
+        # 2 bytes of CRC.
+        if len(self.read_buf) == 0:
+            self.ss_data = self.ss
+        self.read_buf.append(miso)
+        # Wait until block transfer completed.
+        if len(self.read_buf) < 64:
+            return
+        if len(self.read_buf) == 64:
+            self.es_data = self.es
+            self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD6, ['Block data: %s' % self.read_buf]])
+        elif len(self.read_buf) == (64 + 1):
+            self.ss_crc = self.ss
+        elif len(self.read_buf) == (64 + 2):
+            self.es_crc = self.es
+            # TODO: Check CRC.
+            self.put(self.ss_crc, self.es_crc, self.out_ann, [Ann.CMD6, ['CRC']])
+            self.read_buf = []
+            self.state = 'IDLE'
+
+    def handle_data_cmd9(self, miso):
+        # CMD9 returns one byte R1, then some bytes 0xff, then a Start Block
+        # (single byte 0xfe), then 16 bytes of data, then always
+        # 2 bytes of CRC.
+        if len(self.read_buf) == 0:
+            self.ss_data = self.ss
+        self.read_buf.append(miso)
+        # Wait until block transfer completed.
+        if len(self.read_buf) < 16:
+            return
+        if len(self.read_buf) == 16:
+            self.es_data = self.es
+            self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD9, ['CSD: %s' % self.read_buf]])
+        elif len(self.read_buf) == (16 + 1):
+            self.ss_crc = self.ss
+        elif len(self.read_buf) == (16 + 2):
+            self.es_crc = self.es
+            # TODO: Check CRC.
+            self.put(self.ss_crc, self.es_crc, self.out_ann, [Ann.CMD9, ['CRC']])
+            self.read_buf = []
+            self.state = 'IDLE'
+
+    def handle_data_cmd10(self, miso):
+        # CMD10 returns one byte R1, then some bytes 0xff, then a Start Block
+        # (single byte 0xfe), then 16 bytes of data, then always
+        # 2 bytes of CRC.
+        if len(self.read_buf) == 0:
+            self.ss_data = self.ss
+        self.read_buf.append(miso)
+        # Wait until block transfer completed.
+        if len(self.read_buf) < 16:
+            return
+        if len(self.read_buf) == 16:
+            self.es_data = self.es
+            self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD10, ['CID: %s' % self.read_buf]])
+        elif len(self.read_buf) == (16 + 1):
+            self.ss_crc = self.ss
+        elif len(self.read_buf) == (16 + 2):
+            self.es_crc = self.es
+            # TODO: Check CRC.
+            self.put(self.ss_crc, self.es_crc, self.out_ann, [Ann.CMD10, ['CRC']])
+            self.read_buf = []
+            self.state = 'IDLE'
+
     def handle_data_cmd17(self, miso):
         # CMD17 returns one byte R1, then some bytes 0xff, then a Start Block
         # (single byte 0xfe), then self.blocklen bytes of data, then always
         # 2 bytes of CRC.
-        if self.cmd17_start_token_found:
-            if len(self.read_buf) == 0:
-                self.ss_data = self.ss
-                if not self.blocklen:
-                    # Assume a fixed block size when inspection of the previous
-                    # traffic did not provide the respective parameter value.
-                    # TODO: Make the default block size a PD option?
-                    self.blocklen = 512
-            self.read_buf.append(miso)
-            # Wait until block transfer completed.
-            if len(self.read_buf) < self.blocklen:
-                return
-            if len(self.read_buf) == self.blocklen:
-                self.es_data = self.es
-                self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD17, ['Block data: %s' % self.read_buf]])
-            elif len(self.read_buf) == (self.blocklen + 1):
-                self.ss_crc = self.ss
-            elif len(self.read_buf) == (self.blocklen + 2):
-                self.es_crc = self.es
-                # TODO: Check CRC.
-                self.put(self.ss_crc, self.es_crc, self.out_ann, [Ann.CMD17, ['CRC']])
-                self.state = 'IDLE'
-        elif miso == 0xfe:
-            self.put(self.ss, self.es, self.out_ann, [Ann.CMD17, ['Start Block']])
-            self.cmd17_start_token_found = True
+        if len(self.read_buf) == 0:
+            self.ss_data = self.ss
+            if not self.blocklen:
+                # Assume a fixed block size when inspection of the previous
+                # traffic did not provide the respective parameter value.
+                # TODO: Make the default block size a PD option?
+                self.blocklen = 512
+        self.read_buf.append(miso)
+        # Wait until block transfer completed.
+        if len(self.read_buf) < self.blocklen:
+            return
+        if len(self.read_buf) == self.blocklen:
+            self.es_data = self.es
+            self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD17, ['Block data: %s' % self.read_buf]])
+        elif len(self.read_buf) == (self.blocklen + 1):
+            self.ss_crc = self.ss
+        elif len(self.read_buf) == (self.blocklen + 2):
+            self.es_crc = self.es
+            # TODO: Check CRC.
+            self.put(self.ss_crc, self.es_crc, self.out_ann, [Ann.CMD17, ['CRC']])
+            self.read_buf = []
+            self.state = 'IDLE'
 
     def handle_data_cmd24(self, mosi):
-        if self.cmd24_start_token_found:
+        if self.start_token_found:
             if len(self.read_buf) == 0:
                 self.ss_data = self.ss
                 if not self.blocklen:
@@ -408,8 +641,35 @@ class Decoder(srd.Decoder):
             self.read_buf = []
             self.state = 'DATA RESPONSE'
         elif mosi == 0xfe:
+            self.put(self.ss_data, self.ss, self.out_ann, [Ann.CMD24, ['Wait for response']])
             self.put(self.ss, self.es, self.out_ann, [Ann.CMD24, ['Start Block']])
-            self.cmd24_start_token_found = True
+            self.start_token_found = True
+            self.is_first_rx = False
+        elif False == self.is_first_rx:
+            self.ss_data = self.ss
+            self.is_first_rx = True
+
+    def handle_data_acmd51(self, miso):
+        # CMD51 returns one byte R1, then some bytes 0xff, then a Start Block
+        # (single byte 0xfe), then 8 bytes of data, then always
+        # 2 bytes of CRC.
+        if len(self.read_buf) == 0:
+            self.ss_data = self.ss
+        self.read_buf.append(miso)
+        # Wait until block transfer completed.
+        if len(self.read_buf) < 8:
+            return
+        if len(self.read_buf) == 8:
+            self.es_data = self.es
+            self.put(self.ss_data, self.es_data, self.out_ann, [Ann.ACMD51, ['Block data: %s' % self.read_buf]])
+        elif len(self.read_buf) == (8 + 1):
+            self.ss_crc = self.ss
+        elif len(self.read_buf) == (8 + 2):
+            self.es_crc = self.es
+            # TODO: Check CRC.
+            self.put(self.ss_crc, self.es_crc, self.out_ann, [Ann.ACMD51, ['CRC']])
+            self.read_buf = []
+            self.state = 'IDLE'
 
     def handle_data_response(self, miso):
         # Data Response token (1 byte).
@@ -437,23 +697,40 @@ class Decoder(srd.Decoder):
         elif miso == 0x0d:
             self.put(m[3][1], m[1][2], self.out_ann, [Ann.BIT, ['Data rejected (write error)']])
         self.put(m[0][1], m[0][2], self.out_ann, [Ann.BIT, ['Always 1']])
-        cls = Ann.CMD24 if self.is_cmd24 else None
+        cls = Ann.CMD24 if 24 == self.cmd else None
         if cls is not None:
             self.put(self.ss, self.es, self.out_ann, [cls, ['Data Response']])
-        if self.is_cmd24:
+        if 24 == self.cmd:
             # We just send a block of data to be written to the card,
             # this takes some time.
             self.state = 'WAIT WHILE CARD BUSY'
-            self.busy_first_byte = True
         else:
             self.state = 'IDLE'
 
     def wait_while_busy(self, miso):
         if miso != 0x00:
-            cls = Ann.CMD24 if self.is_cmd24 else None
+            cls = Ann.CMD24 if 24 == self.cmd else None
             if cls is not None:
                 self.put(self.ss_busy, self.es_busy, self.out_ann, [cls, ['Card is busy']])
             self.state = 'IDLE'
+            return
+        else:
+            if self.busy_first_byte:
+                self.ss_busy = self.ss
+                self.busy_first_byte = False
+            else:
+                self.es_busy = self.es
+
+    def wait_data_response(self, miso):
+        if miso == 0xfe:
+            self.put(self.ss_busy, self.es_busy, self.out_ann, [Ann.R1, ['Wait for response']])
+            self.put(self.ss, self.es, self.out_ann, [Ann.R1, ['Start Block']])
+            if (not self.is_acmd) and (self.cmd in (6, 9, 10, 17)):
+                self.state = 'HANDLE RX BLOCK CMD%d' % self.cmd
+            elif (self.is_acmd) and (self.cmd == 51):
+                self.state = 'HANDLE RX BLOCK ACMD%d' % self.cmd
+            else:
+                self.state = 'IDLE'
             return
         else:
             if self.busy_first_byte:
@@ -479,9 +756,15 @@ class Decoder(srd.Decoder):
 
         # State machine.
         if self.state == 'IDLE':
+            self.read_buf = []
             # Ignore stray 0xff bytes, some devices seem to send those!?
             if mosi == 0xff: # TODO?
                 return
+            # Leave ACMD mode again after the first command after CMD55.
+            if self.is_acmd:
+                self.is_acmd += 1
+            if self.is_acmd > 2:
+                self.is_acmd = 0
             self.state = 'GET COMMAND TOKEN'
             self.handle_command_token(mosi, miso)
         elif self.state == 'GET COMMAND TOKEN':
@@ -494,13 +777,9 @@ class Decoder(srd.Decoder):
             handle_cmd()
             self.cmd_token = []
             self.cmd_token_bits = []
-            # Leave ACMD mode again after the first command after CMD55.
-            if self.is_acmd and cmdstr != '55':
-                self.is_acmd = False
+            self.start_token_found = False
+            self.busy_first_byte = True
         elif self.state.startswith('GET RESPONSE'):
-            # Ignore stray 0xff bytes, some devices seem to send those!?
-            if miso == 0xff: # TODO?
-                return
             # Call the respective handler method for the response.
             # Assume return to IDLE state, but allow response handlers
             # to advance to some other state when applicable.
@@ -508,11 +787,16 @@ class Decoder(srd.Decoder):
             handle_response = getattr(self, s)
             self.state = 'IDLE'
             handle_response(miso)
-        elif self.state == 'HANDLE DATA BLOCK CMD17':
-            self.handle_data_cmd17(miso)
-        elif self.state == 'HANDLE DATA BLOCK CMD24':
-            self.handle_data_cmd24(mosi)
+        elif self.state.startswith('HANDLE RX BLOCK'):
+            # Call the respective handler method for the response.
+            s = 'handle_data_%s' % self.state[16:].lower()
+            handle_response = getattr(self, s)
+            handle_response(miso)
+        elif self.state == 'WAIT DATA RESPONSE':
+            self.wait_data_response(miso)
         elif self.state == 'DATA RESPONSE':
             self.handle_data_response(miso)
         elif self.state == 'WAIT WHILE CARD BUSY':
             self.wait_while_busy(miso)
+        else:
+            self.state = 'IDLE'
