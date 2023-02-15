@@ -234,7 +234,7 @@ class Decoder(srd.Decoder):
 
     def handle_cmd58(self):
         # CMD58: SEND_OCR (128 bits / 16 bytes)
-        self.putc(Ann.CMD10, 'Ask card to send the OCR register')
+        self.putc(Ann.CMD58, 'Ask card to send the OCR register')
         self.state = 'GET RESPONSE R3'
 
     def handle_cmd59(self):
@@ -603,7 +603,7 @@ class Decoder(srd.Decoder):
         elif len(self.read_buf) == (64 + 2):
             self.es_crc = self.es
             # TODO: Check CRC.
-            self.put(self.ss_crc, self.es_crc, self.out_ann, [Ann.CMD6, ['CRC']])
+            self.put(self.ss_crc, self.es_crc, self.out_ann, [Ann.CMD6, ['CRC - WARNING: If High Speed (HS) mode got set here the next instruction(s) may be decoded incorrectly, see description']])
             self.read_buf = []
             self.state = 'IDLE'
 
@@ -1004,20 +1004,20 @@ class Decoder(srd.Decoder):
                 return
             if len(self.read_buf) == self.blocklen:
                 self.es_data = self.es
-                self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD24, ['Block data: %s' % self.read_buf]])
+                self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD25, ['Block data: %s' % self.read_buf]])
                 self.ss_data = self.es
             if len(self.read_buf) == self.blocklen + 1:
                 self.ss_data = self.ss
             if len(self.read_buf) == self.blocklen + 2:
                 self.es_data = self.es
-                self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD24, ['CRC']])
+                self.put(self.ss_data, self.es_data, self.out_ann, [Ann.CMD25, ['CRC']])
                 self.read_buf = []
                 self.start_token_found = False
                 self.is_first_rx = True
                 self.state = 'DATA RESPONSE'
         elif mosi == 0xfc:
-            self.put(self.ss_data, self.ss, self.out_ann, [Ann.CMD24, ['Wait for response']])
-            self.put(self.ss, self.es, self.out_ann, [Ann.CMD24, ['Start Block']])
+            self.put(self.ss_data, self.ss, self.out_ann, [Ann.CMD25, ['Wait for response']])
+            self.put(self.ss, self.es, self.out_ann, [Ann.CMD25, ['Start Block']])
             self.start_token_found = True
             self.is_first_rx = False
         elif self.finish_token_found:
@@ -1027,8 +1027,8 @@ class Decoder(srd.Decoder):
             self.finish_token_found = False
             self.cmd = 24
         elif mosi == 0xfd:
-            self.put(self.ss_data, self.ss, self.out_ann, [Ann.CMD24, ['Wait for response']])
-            self.put(self.ss, self.es, self.out_ann, [Ann.CMD24, ['End Blocks']])
+            self.put(self.ss_data, self.ss, self.out_ann, [Ann.CMD25, ['Wait for response']])
+            self.put(self.ss, self.es, self.out_ann, [Ann.CMD25, ['Stop Tran']])
             self.finish_token_found = True
         elif False == self.is_first_rx:
             self.ss_data = self.ss
@@ -1199,12 +1199,10 @@ class Decoder(srd.Decoder):
             return
         else:
             if self.busy_first_byte:
-                #self.put(self.ss, self.es, self.out_ann, [Ann.CMD24, ['First busy']])
                 self.ss_busy = self.ss
                 self.es_busy = self.es
                 self.busy_first_byte = False
             else:
-                #self.put(self.ss, self.es, self.out_ann, [Ann.CMD24, ['Still busy']])
                 self.es_busy = self.es
 
     def wait_data_response(self, miso):
@@ -1230,7 +1228,11 @@ class Decoder(srd.Decoder):
         ptype, mosi, miso = data
 
         # For now, only use DATA and BITS packets.
-        if ptype not in ('DATA', 'BITS'):
+        if ptype not in ('DATA', 'BITS', 'CS-CHANGE'):
+            return
+
+        if 'CS-CHANGE' == ptype:
+            self.state = 'IDLE'
             return
 
         # Store the individual bit values and ss/es numbers. The next packet
