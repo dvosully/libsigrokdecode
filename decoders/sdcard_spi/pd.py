@@ -249,6 +249,11 @@ class Decoder(srd.Decoder):
         self.putc(Ann.ACMD41, 'Send HCS info and activate the card init process')
         self.state = 'GET RESPONSE R1'
 
+    def handle_acmd13(self):
+        # CMD13: SEND_STATUS
+        self.putc(Ann.CMD13, 'Ask card to send the Status register')
+        self.state = 'GET RESPONSE R2'
+
     def handle_acmd51(self):
         # ACMD51: SEND_SCR (64 bits / 8 bytes)
         self.putc(Ann.ACMD51, 'Ask card to send its SCR register')
@@ -456,8 +461,11 @@ class Decoder(srd.Decoder):
         s = 'O' if (res & (1 << 7)) else 'Not o'
         putbit(7, ['%sut of Range | CSD overwrite' % s])
 
-        self.state = 'IDLE'
         self.read_buf = []
+        if (self.cmd == 13):
+            self.state = 'WAIT DATA RESPONSE'
+        else:
+            self.state = 'IDLE'
 
 
     def handle_response_r3(self, res):
@@ -1138,6 +1146,29 @@ class Decoder(srd.Decoder):
             self.read_buf = []
             self.state = 'IDLE'
 
+    def handle_data_acmd13(self, miso):
+        # ACMD13 returns one byte R1 and one byte R2, then some bytes 0xff, then a Start Block
+        # (single byte 0xfe), then 64 bytes of data, then always
+        # 2 bytes of CRC.
+        if len(self.read_buf) == 0:
+            self.ss_data = self.ss
+        self.read_buf.append(miso)
+        self.read_buf_bits += self.miso_bits
+        # Wait until block transfer completed.
+        if len(self.read_buf) < 64:
+            return
+        if len(self.read_buf) == 64:
+            self.es_data = self.es
+            self.put(self.ss_data, self.es_data, self.out_ann, [Ann.ACMD13, ['Status block: %s' % self.read_buf]])
+        elif len(self.read_buf) == (64 + 1):
+            self.ss_crc = self.ss
+        elif len(self.read_buf) == (64 + 2):
+            self.es_crc = self.es
+            # TODO: Check CRC.
+            self.put(self.ss_crc, self.es_crc, self.out_ann, [Ann.ACMD51, ['CRC']])
+            self.read_buf = []
+            self.state = 'IDLE'
+
     def handle_data_response(self, miso):
         # Data Response token (1 byte).
         #
@@ -1206,12 +1237,14 @@ class Decoder(srd.Decoder):
                 self.es_busy = self.es
 
     def wait_data_response(self, miso):
-        if miso == 0xfe:
+        if (miso == 0xfe) or (miso == 0xfc):
             self.put(self.ss_busy, self.es_busy, self.out_ann, [Ann.R1, ['Wait for response']])
             self.put(self.ss, self.es, self.out_ann, [Ann.R1, ['Start Block']])
             if (not self.is_acmd) and (self.cmd in (6, 9, 10, 17)):
                 self.state = 'HANDLE RX BLOCK CMD%d' % self.cmd
             elif (self.is_acmd) and (self.cmd == 51):
+                self.state = 'HANDLE RX BLOCK ACMD%d' % self.cmd
+            elif (self.is_acmd) and (self.cmd == 13):
                 self.state = 'HANDLE RX BLOCK ACMD%d' % self.cmd
             else:
                 self.state = 'IDLE'
