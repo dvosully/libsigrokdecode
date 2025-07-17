@@ -232,6 +232,12 @@ class Decoder(srd.Decoder):
         self.is_acmd = 1
         self.state = 'GET RESPONSE R1'
 
+    def handle_acmd55(self):
+        # CMD55: APP_CMD
+        self.putc(Ann.CMD55, 'ERROR - consecutive CMD55! Next command is an application-specific command')
+        self.is_acmd = 1
+        self.state = 'GET RESPONSE R1'
+
     def handle_cmd58(self):
         # CMD58: SEND_OCR (128 bits / 16 bytes)
         self.putc(Ann.CMD58, 'Ask card to send the OCR register')
